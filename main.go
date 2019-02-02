@@ -58,55 +58,55 @@ func (q *Queue) Handle(p *nfqueue.Packet) {
 		}
 
 		//handshake_len := binary.BigEndian.Uint16(pLoad[3:5]) + 5
-		handshake_protocol := pLoad[5]
+		handshakeProtocol := pLoad[5]
 
 		// Only try client hellos
-		if handshake_protocol == 0x1 {
-			offset, base_offset, extension_offset := uint16(0), uint16(43), uint16(2)
+		if handshakeProtocol == 0x1 {
+			offset, baseOffset, extensionOffset := uint16(0), uint16(43), uint16(2)
 
 			// Get the length of the session ID
-			session_id_len := uint16(pLoad[base_offset])
+			sessionIdLen := uint16(pLoad[baseOffset])
 
 			// Get the length of the ciphers
-			cipher_len_start := base_offset + session_id_len + 1
-			cipher_len := binary.BigEndian.Uint16(pLoad[cipher_len_start : cipher_len_start+2])
-			offset = base_offset + session_id_len + cipher_len + 2
+			cipherLenStart := baseOffset + sessionIdLen + 1
+			cipherLen := binary.BigEndian.Uint16(pLoad[cipherLenStart : cipherLenStart+2])
+			offset = baseOffset + sessionIdLen + cipherLen + 2
 
 			// Get the length of the compression methods list
-			compression_len := uint16(pLoad[offset+1])
-			offset += compression_len + 2
+			compressionLen := uint16(pLoad[offset+1])
+			offset += compressionLen + 2
 
 			// Get the length of the extensions
-			extensions_len := binary.BigEndian.Uint16(pLoad[offset : offset+2])
+			extensionsLen := binary.BigEndian.Uint16(pLoad[offset : offset+2])
 
 			// Add the full offset to were the extensions start
-			extension_offset += offset
+			extensionOffset += offset
 
-			for extension_offset < extensions_len {
-				extension_id := binary.BigEndian.Uint16(pLoad[extension_offset : extension_offset+2])
-				extension_offset += 2
+			for extensionOffset < extensionsLen {
+				extensionId := binary.BigEndian.Uint16(pLoad[extensionOffset : extensionOffset+2])
+				extensionOffset += 2
 
-				extension_len := binary.BigEndian.Uint16(pLoad[extension_offset : extension_offset+2])
-				extension_offset += 2
+				extensionLen := binary.BigEndian.Uint16(pLoad[extensionOffset : extensionOffset+2])
+				extensionOffset += 2
 
-				if extension_id == 0 {
+				if extensionId == 0 {
 					// We don't need the server name list length or name_type, so skip that
-					extension_offset += 3
+					extensionOffset += 3
 
 					// Get the length of the domain name
-					name_length := binary.BigEndian.Uint16(pLoad[extension_offset : extension_offset+2])
-					extension_offset += 2
+					nameLength := binary.BigEndian.Uint16(pLoad[extensionOffset : extensionOffset+2])
+					extensionOffset += 2
 
-					domain_name := string(pLoad[extension_offset : extension_offset+name_length])
-					fmt.Println(domain_name)
+					domainName := string(pLoad[extensionOffset : extensionOffset+nameLength])
+					fmt.Println(domainName)
 
-					if domain_name == domainToBlock {
+					if domainName == domainToBlock {
 						p.Drop()
 						return
 					}
 				}
 
-				extension_offset += extension_len
+				extensionOffset += extensionLen
 			}
 		}
 	}
