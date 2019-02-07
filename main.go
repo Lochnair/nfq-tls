@@ -1,12 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"encoding/binary"
 	"flag"
 	"fmt"
+	"github.com/Lochnair/go-patricia/patricia"
 	"github.com/Telefonica/nfqueue"
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
+	"github.com/shomali11/util/xstrings"
+	"golang.org/x/net/idna"
+	"os"
 )
 
 type Queue struct {
@@ -36,8 +41,6 @@ func (q *Queue) Start() error {
 func (q *Queue) Stop() error {
 	return q.queue.Stop()
 }
-
-var domainToBlock string
 
 // Handle a nfqueue packet. It implements nfqueue.PacketHandler interface.
 func (q *Queue) Handle(p *nfqueue.Packet) {
@@ -133,18 +136,22 @@ func (q *Queue) Handle(p *nfqueue.Packet) {
 				extensionOffset += 2
 
 				domainName := string(payload[extensionOffset : extensionOffset+nameLength])
-					fmt.Println(domainName)
+				reversedDomain := xstrings.Reverse(domainName)
+				_, _, found, leftover := domainTrie.FindSubtree(patricia.Prefix(reversedDomain))
 
-					if domainName == domainToBlock {
-						p.Drop()
-						return
-					}
-				}
-
-				extensionOffset += extensionLen
+				/*
+				 * Match is true if either the domain matches perfectly in the Trie
+				 * or if the first character of the leftover is a wildcard
+				 */
+				match := found || (len(leftover) > 0 && leftover[0] == 42)
+				IfElseDoAction(match, p.Drop, p.Accept)
+				break
 			}
+
+			extensionOffset += extensionLen
 		}
 	}
+}
 
 func IfElseDoAction(condition bool, a func() error, b func() error) {
 	var err error
@@ -159,23 +166,67 @@ func IfElseDoAction(condition bool, a func() error, b func() error) {
 		fmt.Println("An error occurred: " + err.Error())
 	}
 }
+
+func loadDomainsFromFile(path *string) {
+	file, err := os.Open(*path)
+
+	if err != nil {
+		fmt.Println("Error: Couldn't open specified file: " + err.Error())
+		return
+	}
+
+	scanner := bufio.NewScanner(file)
+
+	for scanner.Scan() {
+		punycode, err := idnaProfile.ToASCII(scanner.Text())
+
+		if err != nil {
+			fmt.Printf("An error occurred while converting domain %s to punycode: %s\n", scanner.Text(), err.Error())
+			continue
+		}
+
+		reversedDomain := xstrings.Reverse(punycode)
+		domainTrie.Insert(patricia.Prefix(reversedDomain), 0)
+	}
 }
 
 var acceptOnError bool
+var domainTrie *patricia.Trie
+var idnaProfile *idna.Profile
+
 func main() {
-	flag.StringVar(&domainToBlock, "domain", "", "Domain to block")
+	filePath := flag.String("f", "", "File containing domains to block")
 	queueId := *flag.Uint("queue", 1, "Queue ID")
 	flag.BoolVar(&acceptOnError, "k", true, "Accept if there's an error")
 
 	flag.Parse()
 
-	if domainToBlock == "" {
-		fmt.Println("You must enter a domain")
+	if *filePath == "" {
+		fmt.Println("You must specify a file")
+		flag.Usage()
 		return
 	}
 
+	/**
+	 * Use standard lookup profile
+	 * except for strict domain name validation
+	 * so we can convert domains with wildcards in them
+	 */
+	idnaProfile = idna.New(
+		idna.MapForLookup(),
+		idna.Transitional(true),
+		idna.StrictDomainName(false))
+
+	domainTrie = patricia.NewTrie()
+	loadDomainsFromFile(filePath)
+
 	q := NewQueue(uint16(queueId))
-	q.Start()
-	wait := make(chan bool)
-	<-wait
+
+	if err := q.Start(); err != nil {
+		fmt.Println("Severe: Error upon starting queue: " + err.Error())
+		return
+	}
+
+	// Make use of channels to prevent the program from exiting prematurely
+	<-make(chan bool)
 }
