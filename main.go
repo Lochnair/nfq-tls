@@ -45,59 +45,94 @@ func (q *Queue) Handle(p *nfqueue.Packet) {
 
 	if tcpLayer := ipLayer.Layer(layers.LayerTypeTCP); tcpLayer != nil {
 		tcp, _ := tcpLayer.(*layers.TCP)
-		pLoad := tcp.Payload
+		payload := tcp.Payload
+		payloadLength := uint16(len(payload))
 
-		if len(pLoad) < 10 {
+		if len(payload) < 10 {
+			IfElseDoAction(acceptOnError, p.Accept, p.Drop)
+			return
+		}
+
+		if payload[0] != 0x16 {
 			p.Accept()
 			return
 		}
 
-		if pLoad[0] != 0x16 {
+		handshakeLength := binary.BigEndian.Uint16(payload[3:5]) + 5
+		handshakeProtocol := payload[5]
+
+		// Only attempt to match on client hellos
+		if handshakeProtocol != 0x01 {
 			p.Accept()
 			return
 		}
 
-		//handshake_len := binary.BigEndian.Uint16(pLoad[3:5]) + 5
-		handshakeProtocol := pLoad[5]
+		// If we don't have all the data, try matching with what we have
+		if handshakeLength > payloadLength {
+			handshakeLength = payloadLength
+		}
 
-		// Only try client hellos
-		if handshakeProtocol == 0x1 {
-			offset, baseOffset, extensionOffset := uint16(0), uint16(43), uint16(2)
+		offset, baseOffset, extensionOffset := uint16(0), uint16(43), uint16(2)
 
-			// Get the length of the session ID
-			sessionIdLen := uint16(pLoad[baseOffset])
+		if baseOffset + 2 > uint16(len(payload)) {
+			IfElseDoAction(acceptOnError, p.Accept, p.Drop)
+			return
+		}
 
-			// Get the length of the ciphers
-			cipherLenStart := baseOffset + sessionIdLen + 1
-			cipherLen := binary.BigEndian.Uint16(pLoad[cipherLenStart : cipherLenStart+2])
-			offset = baseOffset + sessionIdLen + cipherLen + 2
+		// Get the length of the session ID
+		sessionIdLength := uint16(payload[baseOffset])
 
-			// Get the length of the compression methods list
-			compressionLen := uint16(pLoad[offset+1])
-			offset += compressionLen + 2
+		if (sessionIdLength + baseOffset + 2) > handshakeLength {
+			IfElseDoAction(acceptOnError, p.Accept, p.Drop)
+			return
+		}
 
-			// Get the length of the extensions
-			extensionsLen := binary.BigEndian.Uint16(pLoad[offset : offset+2])
+		// Get the length of the ciphers
+		cipherLenStart := baseOffset + sessionIdLength + 1
+		cipherLen := binary.BigEndian.Uint16(payload[cipherLenStart : cipherLenStart+2])
+		offset = baseOffset + sessionIdLength + cipherLen + 2
 
-			// Add the full offset to were the extensions start
-			extensionOffset += offset
+		if offset > handshakeLength {
+			IfElseDoAction(acceptOnError, p.Accept, p.Drop)
+			return
+		}
 
-			for extensionOffset < extensionsLen {
-				extensionId := binary.BigEndian.Uint16(pLoad[extensionOffset : extensionOffset+2])
+		// Get the length of the compression methods list
+		compressionLen := uint16(payload[offset+1])
+		offset += compressionLen + 2
+
+		if offset > handshakeLength {
+			IfElseDoAction(acceptOnError, p.Accept, p.Drop)
+			return
+		}
+
+		// Get the length of the extensions
+		extensionsLen := binary.BigEndian.Uint16(payload[offset : offset+2])
+
+		// Add the full offset to were the extensions start
+		extensionOffset += offset
+
+		if extensionsLen > handshakeLength {
+			IfElseDoAction(acceptOnError, p.Accept, p.Drop)
+			return
+		}
+
+		for extensionOffset < extensionsLen {
+			extensionId := binary.BigEndian.Uint16(payload[extensionOffset : extensionOffset+2])
+			extensionOffset += 2
+
+			extensionLen := binary.BigEndian.Uint16(payload[extensionOffset : extensionOffset+2])
+			extensionOffset += 2
+
+			if extensionId == 0 {
+				// We don't need the server name list length or name_type, so skip that
+				extensionOffset += 3
+
+				// Get the length of the domain name
+				nameLength := binary.BigEndian.Uint16(payload[extensionOffset : extensionOffset+2])
 				extensionOffset += 2
 
-				extensionLen := binary.BigEndian.Uint16(pLoad[extensionOffset : extensionOffset+2])
-				extensionOffset += 2
-
-				if extensionId == 0 {
-					// We don't need the server name list length or name_type, so skip that
-					extensionOffset += 3
-
-					// Get the length of the domain name
-					nameLength := binary.BigEndian.Uint16(pLoad[extensionOffset : extensionOffset+2])
-					extensionOffset += 2
-
-					domainName := string(pLoad[extensionOffset : extensionOffset+nameLength])
+				domainName := string(payload[extensionOffset : extensionOffset+nameLength])
 					fmt.Println(domainName)
 
 					if domainName == domainToBlock {
@@ -111,12 +146,26 @@ func (q *Queue) Handle(p *nfqueue.Packet) {
 		}
 	}
 
-	p.Accept()
+func IfElseDoAction(condition bool, a func() error, b func() error) {
+	var err error
+
+	if condition {
+		err = a()
+	} else {
+		err = b()
+	}
+
+	if err != nil {
+		fmt.Println("An error occurred: " + err.Error())
+	}
+}
 }
 
+var acceptOnError bool
 func main() {
 	flag.StringVar(&domainToBlock, "domain", "", "Domain to block")
 	queueId := *flag.Uint("queue", 1, "Queue ID")
+	flag.BoolVar(&acceptOnError, "k", true, "Accept if there's an error")
 
 	flag.Parse()
 
